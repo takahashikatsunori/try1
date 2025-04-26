@@ -9,17 +9,15 @@ import math
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ログ設定: コンソールにタイムスタンプ付きでINFOレベル以上を出力
+# ログ設定: コンソールにタイムスタンプ付きで INFO レベル以上を出力
 logging.basicConfig(
     format='[%(asctime)s] %(levelname)s: %(message)s',
     level=logging.INFO,
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# 設定ファイルのパス
 CONFIG_PATH = 'config.json'
 FIELD_CONFIG_PATH = 'field_config.json'
-# JIRA REST API の1回あたりの最大取得件数
 MAX_RESULTS_PER_CALL = 1000
 
 
@@ -36,11 +34,11 @@ def load_or_create_basic_config():
             "jql": "project = YOURPROJECT AND status = Open",
             "max_workers": 5
         }
-        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+        with open(CONFIG_PATH, 'w', encoding='utf-8', errors='replace') as f:
             json.dump(template, f, indent=4, ensure_ascii=False)
         logging.info(f"基本設定ファイルを作成しました: {CONFIG_PATH}。設定を入力して再実行してください。")
         sys.exit(0)
-    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+    with open(CONFIG_PATH, 'r', encoding='utf-8', errors='replace') as f:
         return json.load(f)
 
 
@@ -52,12 +50,15 @@ def load_or_create_field_config(jira_url, auth):
     """
     if not os.path.exists(FIELD_CONFIG_PATH):
         logging.info("フィールド設定ファイルが見つかりません。JIRAサーバーからフィールド一覧を取得します。")
-        # curlコマンドでフィールド一覧を取得
         cmd = [
-            'curl', '--proxy-ntlm', '-u', f'{auth}', '-X', 'GET',
+            'curl', '--proxy-ntlm', auth and '-u' or '', auth, '-X', 'GET',
+            f'{jira_url}/rest/api/2/field'
+        ] if auth else [
+            'curl', '--proxy-ntlm', '-X', 'GET',
             f'{jira_url}/rest/api/2/field'
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # 標準出力は UTF-8、変な文字は置換
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
         if result.returncode != 0:
             logging.error(f"フィールド一覧取得に失敗しました: {result.stderr}")
             sys.exit(1)
@@ -66,7 +67,6 @@ def load_or_create_field_config(jira_url, auth):
         except json.JSONDecodeError as e:
             logging.error(f"JSON解析エラー: {e}")
             sys.exit(1)
-        # テンプレート作成
         field_config = []
         for field in fields:
             field_config.append({
@@ -75,25 +75,25 @@ def load_or_create_field_config(jira_url, auth):
                 "include": False,
                 "include_history": False
             })
-        with open(FIELD_CONFIG_PATH, 'w', encoding='utf-8') as f:
+        with open(FIELD_CONFIG_PATH, 'w', encoding='utf-8', errors='replace') as f:
             json.dump(field_config, f, indent=4, ensure_ascii=False)
         logging.info(f"フィールド設定ファイルを作成しました: {FIELD_CONFIG_PATH}。設定を入力して再実行してください。")
         sys.exit(0)
-    with open(FIELD_CONFIG_PATH, 'r', encoding='utf-8') as f:
+    with open(FIELD_CONFIG_PATH, 'r', encoding='utf-8', errors='replace') as f:
         return json.load(f)
 
 
 def get_total_issues(jira_url, auth, jql):
     """
-    JQLにマッチするチケットの総数を取得する。
-    maxResults=0でtotalのみを取得する。
+    JQL にマッチするチケットの総数を取得する。
+    maxResults=0 で total のみを取得する。
     """
     logging.info("総チケット数を取得中...")
     cmd = [
-        'curl', '--proxy-ntlm', '-u', f'{auth}', '-X', 'GET',
+        'curl', '--proxy-ntlm', auth and '-u' or '', auth, '-X', 'GET',
         f'{jira_url}/rest/api/2/search?jql={jql}&startAt=0&maxResults=0'
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
     if result.returncode != 0:
         logging.error(f"総チケット数取得に失敗しました: {result.stderr}")
         sys.exit(1)
@@ -109,17 +109,19 @@ def get_total_issues(jira_url, auth, jql):
 
 def download_chunk(jira_url, auth, jql, fields_param, expand_param, start_at):
     """
-    指定したstartAtからチケットを取得し、JSONファイルに保存する。
+    指定した startAt からチケットを取得し、JSON ファイルに保存する。
     """
     logging.info(f"チケット取得開始: startAt={start_at}")
     url = f'{jira_url}/rest/api/2/search?jql={jql}&startAt={start_at}&maxResults={MAX_RESULTS_PER_CALL}&fields={fields_param}'
     if expand_param:
         url += f'&expand={expand_param}'
-    cmd = ['curl', '--proxy-ntlm', '-u', f'{auth}', '-X', 'GET', url]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    cmd = [
+        'curl', '--proxy-ntlm', auth and '-u' or '', auth, '-X', 'GET', url
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
     filename = f'tickets_{start_at}.json'
     if result.returncode == 0:
-        with open(filename, 'w', encoding='utf-8') as f:
+        with open(filename, 'w', encoding='utf-8', errors='replace') as f:
             f.write(result.stdout)
         logging.info(f"取得完了: {filename}")
     else:
@@ -127,29 +129,24 @@ def download_chunk(jira_url, auth, jql, fields_param, expand_param, start_at):
 
 
 def main():
-    # 基本設定とフィールド設定の読み込み
     config = load_or_create_basic_config()
     jira_url = config.get('jira_url').rstrip('/')
     username = config.get('username')
     password = config.get('password')
     jql = config.get('jql')
     max_workers = config.get('max_workers', 5)
-    auth = f'{username}:{password}'
+    auth = f'{username}:{password}' if username and password else ''
 
     field_config = load_or_create_field_config(jira_url, auth)
-    # ダウンロード対象のフィールドをフィルタ
     included_fields = [f['id'] for f in field_config if f.get('include')]
     fields_param = ','.join(included_fields) if included_fields else '*all'
-    # 更新履歴の取得要否
     expand_param = 'changelog' if any(f.get('include_history') for f in field_config) else ''
 
-    # 総チケット数取得
     total = get_total_issues(jira_url, auth, jql)
     if total == 0:
         logging.info("取得対象のチケットがありません。")
         return
 
-    # 並列ダウンロード
     num_chunks = math.ceil(total / MAX_RESULTS_PER_CALL)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
@@ -158,8 +155,8 @@ def main():
             futures.append(
                 executor.submit(download_chunk, jira_url, auth, jql, fields_param, expand_param, start_at)
             )
-        for future in as_completed(futures):
-            pass  # ログは関数内で出力
+        for _ in as_completed(futures):
+            pass
 
 if __name__ == '__main__':
     main()
