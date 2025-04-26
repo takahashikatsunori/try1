@@ -7,6 +7,7 @@ import subprocess
 import sys
 import math
 import logging
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ログ設定: コンソールにタイムスタンプ付きで INFO レベル以上を出力
@@ -50,17 +51,14 @@ def load_or_create_field_config(jira_url, auth):
     """
     if not os.path.exists(FIELD_CONFIG_PATH):
         logging.info("フィールド設定ファイルが見つかりません。JIRAサーバーからフィールド一覧を取得します。")
-        cmd = [
-            'curl', '--proxy-ntlm', auth and '-u' or '', auth, '-X', 'GET',
-            f'{jira_url}/rest/api/2/field'
-        ] if auth else [
-            'curl', '--proxy-ntlm', '-X', 'GET',
-            f'{jira_url}/rest/api/2/field'
-        ]
-        # 標準出力は UTF-8、変な文字は置換
+        url = f"{jira_url}/rest/api/2/field"
+        cmd = ['curl', '--proxy-ntlm']
+        if auth:
+            cmd += ['-u', auth]
+        cmd += ['-X', 'GET', url]
         result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
         if result.returncode != 0:
-            logging.error(f"フィールド一覧取得に失敗しました: {result.stderr}")
+            logging.error(f"フィールド一覧取得に失敗しました: {result.stderr.strip()}")
             sys.exit(1)
         try:
             fields = json.loads(result.stdout)
@@ -83,19 +81,33 @@ def load_or_create_field_config(jira_url, auth):
         return json.load(f)
 
 
+def build_curl_command(jira_url, auth, endpoint, params):
+    """
+    curl コマンドを組み立てる。
+    endpoint: '/rest/api/2/search' など
+    params: dict でクエリ文字列を指定
+    """
+    # URL エンコード
+    query = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+    url = f"{jira_url}{endpoint}?{query}"
+    cmd = ['curl', '--proxy-ntlm']
+    if auth:
+        cmd += ['-u', auth]
+    cmd += ['-X', 'GET', url]
+    return cmd
+
+
 def get_total_issues(jira_url, auth, jql):
     """
     JQL にマッチするチケットの総数を取得する。
     maxResults=0 で total のみを取得する。
     """
     logging.info("総チケット数を取得中...")
-    cmd = [
-        'curl', '--proxy-ntlm', auth and '-u' or '', auth, '-X', 'GET',
-        f'{jira_url}/rest/api/2/search?jql={jql}&startAt=0&maxResults=0'
-    ]
+    params = {'jql': jql, 'startAt': 0, 'maxResults': 0}
+    cmd = build_curl_command(jira_url, auth, '/rest/api/2/search', params)
     result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
     if result.returncode != 0:
-        logging.error(f"総チケット数取得に失敗しました: {result.stderr}")
+        logging.error(f"総チケット数取得に失敗しました: {result.stderr.strip()}")
         sys.exit(1)
     try:
         data = json.loads(result.stdout)
@@ -112,12 +124,15 @@ def download_chunk(jira_url, auth, jql, fields_param, expand_param, start_at):
     指定した startAt からチケットを取得し、JSON ファイルに保存する。
     """
     logging.info(f"チケット取得開始: startAt={start_at}")
-    url = f'{jira_url}/rest/api/2/search?jql={jql}&startAt={start_at}&maxResults={MAX_RESULTS_PER_CALL}&fields={fields_param}'
+    params = {
+        'jql': jql,
+        'startAt': start_at,
+        'maxResults': MAX_RESULTS_PER_CALL,
+        'fields': fields_param
+    }
     if expand_param:
-        url += f'&expand={expand_param}'
-    cmd = [
-        'curl', '--proxy-ntlm', auth and '-u' or '', auth, '-X', 'GET', url
-    ]
+        params['expand'] = expand_param
+    cmd = build_curl_command(jira_url, auth, '/rest/api/2/search', params)
     result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
     filename = f'tickets_{start_at}.json'
     if result.returncode == 0:
@@ -125,7 +140,7 @@ def download_chunk(jira_url, auth, jql, fields_param, expand_param, start_at):
             f.write(result.stdout)
         logging.info(f"取得完了: {filename}")
     else:
-        logging.error(f"取得失敗: startAt={start_at}。エラー: {result.stderr}")
+        logging.error(f"取得失敗: startAt={start_at}。エラー: {result.stderr.strip()}")
 
 
 def main():
